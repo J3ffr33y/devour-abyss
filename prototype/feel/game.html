@@ -96,12 +96,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--bio); outli
   <div class="box">
     <div class="sub">DEVOUR · ECHOES OF THE ABYSS</div>
     <h1>深渊之种</h1>
-    <div class="sub">手感原型 v0.1</div>
+    <div class="sub">手感原型 v0.2</div>
     <table>
       <tr><td>WASD / 方向键</td><td>游动（或按住鼠标左键朝指针游）</td></tr>
       <tr><td>空格 / Shift</td><td>冲刺（需要先吞下银色箭鱼）</td></tr>
       <tr><td>F</td><td>发光开关（需要先吞下发光水母）</td></tr>
-      <tr><td>T</td><td>打开手感参数面板</td></tr>
+      <tr><td>T / M</td><td>手感参数面板 / 静音</td></tr>
       <tr><td>手机</td><td>左半屏拖动摇杆，右下角按钮</td></tr>
     </table>
     <div style="color:var(--dim);font-size:12px">碰到比你小的生物会自动吞下。比你大的掠食者会追你，看到头顶「!」就快跑。</div>
@@ -119,14 +119,16 @@ const $ = id => document.getElementById(id);
 // ---------- tunable feel parameters ----------
 const DEFAULTS = {
   accel: 900, drag: 2.6, maxSpeed: 190, turnRate: 9,
-  dashPower: 520, dashCooldown: 1.1, biteReach: 1.25, growth: 1.0,
-  camLag: 5, lookAhead: 0.35, hitstop: 0.05, shake: 1.0,
+  dashPower: 520, dashCooldown: 1.1, biteReach: 1.6, growth: 1.0,
+  camLag: 5, lookAhead: 0.35, hitstop: 0.06, shake: 1.2,
+  suction: 1.0, chaseGiveUp: 4, retreatTime: 5,
 };
 const LABELS = {
   accel: ['加速度', 200, 2500, 10], drag: ['水阻（越大越快停下）', 0.3, 8, 0.1], maxSpeed: ['最高速度', 60, 400, 5],
   turnRate: ['转身速度', 1, 25, 0.5], dashPower: ['冲刺力度', 150, 1200, 10], dashCooldown: ['冲刺冷却 (秒)', 0.2, 4, 0.1],
   biteReach: ['嘴的判定范围', 0.6, 2.5, 0.05], growth: ['成长倍率', 0.2, 5, 0.1],
   camLag: ['镜头跟随速度', 1, 15, 0.5], lookAhead: ['镜头前瞻', 0, 1, 0.05], hitstop: ['吞噬顿帧 (秒)', 0, 0.15, 0.01], shake: ['震屏强度', 0, 3, 0.1],
+  suction: ['吸食力度', 0, 3, 0.1], chaseGiveUp: ['掠食者追多久没咬到就放弃 (秒)', 1, 12, 0.5], retreatTime: ['放弃后多久不再攻击 (秒)', 0, 15, 0.5],
 };
 let P = { ...DEFAULTS };
 try { const s = JSON.parse(localStorage.getItem('abyss-feel') || 'null'); if (s) Object.assign(P, s); } catch (e) {}
@@ -149,6 +151,7 @@ const snow = Array.from({ length: 220 }, () => ({ x: Math.random(), y: Math.rand
 const pl = {
   x: START.x, y: START.y, vx: 0, vy: 0, ang: 0, mass: 1, r: 6, energy: 100, hp: 100,
   dash: false, light: false, lightOn: false, dashCd: 0, noise: 0, jaw: 0, hurtT: 0, dead: 0, eaten: 0,
+  squash: 0, chomp: 0, gulps: [], combo: 0, comboT: 0,
   tail: [],
 };
 const resetTail = () => { pl.tail = Array.from({ length: 9 }, (_, i) => ({ x: pl.x - i * 3, y: pl.y })); };
@@ -157,7 +160,7 @@ resetTail();
 // ---------- creatures ----------
 const TYPES = {
   plankton: { r: [1.6, 2.6], spd: 18, color: '#9ff7ff', glow: true, food: 3, depth: [0, 3200] },
-  minnow:   { r: [4, 6.5], spd: 150, color: '#b9cfd9', food: 9, depth: [100, 1500] },
+  minnow:   { r: [3.2, 6.5], spd: 150, color: '#b9cfd9', food: 9, depth: [100, 1500] },
   shrimp:   { r: [3.5, 5.5], spd: 60, color: '#e8907a', food: 7, depth: [700, 2700] },
   jelly:    { r: [9, 12], spd: 22, color: '#5ff2d4', glow: true, food: 12, depth: [500, 2400], organ: 'light' },
   dart:     { r: [8, 10], spd: 250, color: '#e9f2f6', food: 14, depth: [200, 1800], organ: 'dash' },
@@ -194,6 +197,10 @@ function populate() {
   // guarantee one jelly and one dart near the start so organs are reachable
   spawn('jelly', START.x + 520, START.y + 260);
   spawn('dart', START.x - 380, START.y + 120);
+  // a food-rich nursery around the start so the first seconds are about eating
+  for (let i = 0; i < 70; i++) spawn('plankton', START.x + rand(-450, 450), START.y + rand(-250, 300));
+  const id = ++schoolId;
+  for (let i = 0; i < 7; i++) { const c = spawn('minnow', START.x + 260 + rand(-30, 30), START.y - 60 + rand(-20, 20), id); c.r = rand(3.2, 4.4); }
 }
 populate();
 const respawnQ = [];
@@ -202,6 +209,27 @@ const respawnQ = [];
 const parts = [];
 const puff = (x, y, n, color, spd, life, size) => { for (let i = 0; i < n; i++) { const a = rand(0, 6.28), s = rand(0.2, 1) * spd; parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life, max: life, color, size: size * rand(0.5, 1.2) }); } };
 let shakeT = 0, shakeMag = 0, hitstopT = 0;
+const swallows = [];   // prey being pulled into the mouth
+const floats = [];     // floating combo text
+// ---------- sound (synthesized, no files) ----------
+let AC = null, muted = false;
+function initAudio() { try { AC = AC || new (window.AudioContext || window.webkitAudioContext)(); if (AC.state === 'suspended') AC.resume(); } catch (e) { AC = null; } }
+function tone(f0, f1, dur, vol, type = 'sine') {
+  if (!AC || muted) return;
+  const t = AC.currentTime, o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.008); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(AC.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function noise(dur, vol, freq) {
+  if (!AC || muted) return;
+  const t = AC.currentTime, n = AC.sampleRate * dur | 0, buf = AC.createBuffer(1, n, AC.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const src = AC.createBufferSource(), f = AC.createBiquadFilter(), g = AC.createGain();
+  f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = 0.8; g.gain.value = vol;
+  src.buffer = buf; src.connect(f).connect(g).connect(AC.destination); src.start(t);
+}
+const sGulp = (size, combo) => { const p = clamp(1 - size / 30, 0.25, 1); tone(260 * p + 40 + combo * 18, 50 * p + 25, 0.13 + (1 - p) * 0.12, 0.35); noise(0.06, 0.25, 900 * p + 200); };
 const shake = (m, t) => { shakeMag = Math.max(shakeMag, m * P.shake); shakeT = Math.max(shakeT, t); };
 let toastT = 0;
 function toast(msg, t = 2.6) { const el = $('toast'); el.textContent = msg; el.style.opacity = 1; toastT = t; }
@@ -217,6 +245,7 @@ addEventListener('keydown', e => {
   if (k === ' ' || k === 'shift') tryDash();
   if (k === 'f') toggleLight();
   if (k === 't') toggleTune();
+  if (k === 'm') { muted = !muted; hint(muted ? '已静音（M 恢复）' : '声音已开启', 1.5); }
   if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
 });
 addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
@@ -262,7 +291,7 @@ function tryDash() {
   pl.vx += Math.cos(a) * P.dashPower; pl.vy += Math.sin(a) * P.dashPower;
   pl.ang = a; pl.dashCd = P.dashCooldown; pl.energy -= 12; pl.noise = 1;
   puff(pl.x, pl.y, 14, 'rgba(200,240,255,0.8)', 120, 0.45, 2.2);
-  shake(2, 0.12);
+  shake(2, 0.12); noise(0.25, 0.35, 500);
 }
 function toggleLight() {
   if (pl.dead || !running) return;
@@ -301,9 +330,15 @@ function eat(c) {
   const T = TYPES[c.type];
   pl.energy = Math.min(100, pl.energy + T.food); pl.hp = Math.min(100, pl.hp + T.food * 0.3);
   grow(c);
-  pl.jaw = 1;
+  // chomp: jaw snaps shut, body squashes, a bulge travels down the body
+  pl.jaw = 0; pl.chomp = 0.14; pl.squash = Math.min(1, 0.35 + c.r / pl.r);
+  pl.gulps.push({ pos: 0, size: Math.min(0.6, c.r / pl.r) });
+  swallows.push({ x: c.x, y: c.y, r: c.r, t: 0, type: c.type, ang: c.ang });
+  pl.combo = pl.comboT > 0 ? pl.combo + 1 : 1; pl.comboT = 1.3;
+  if (pl.combo >= 3) floats.push({ x: pl.x, y: pl.y - pl.r * 2, txt: '连吞 ×' + pl.combo, t: 0.9 });
+  sGulp(c.r, Math.min(pl.combo, 8));
   puff(c.x, c.y, 6 + (c.r | 0), T.color, 40 + c.r * 4, 0.5, Math.max(1.2, c.r * 0.25));
-  if (c.r > 3) { hitstopT = Math.max(hitstopT, P.hitstop * Math.min(2.5, c.r / 6)); shake(Math.min(8, c.r * 0.35), 0.15); }
+  if (c.r > 3) { hitstopT = Math.max(hitstopT, P.hitstop * Math.min(2.5, c.r / 6)); shake(Math.min(10, c.r * 0.45), 0.16); }
   if (T.organ === 'light' && !pl.light) { pl.light = true; pl.lightOn = true; toast('获得器官 · 发光'); hint('按 F 开关发光。发光看得更远，也会引来浮游生物，但掠食者也更容易发现你，还耗能量。', 7); }
   if (T.organ === 'dash' && !pl.dash) { pl.dash = true; toast('获得器官 · 冲刺'); hint('按 空格 冲刺。冲刺会发出声响，惊动附近的生物。', 6); }
   respawnQ.push({ type: c.type, t: c.type === 'plankton' ? 4 : 18, school: c.type === 'minnow' });
@@ -315,7 +350,7 @@ function hurt(dmg, fx, fy) {
   const d = Math.hypot(pl.x - fx, pl.y - fy) || 1;
   pl.vx += (pl.x - fx) / d * 380; pl.vy += (pl.y - fy) / d * 380;
   puff(pl.x, pl.y, 16, 'rgba(255,107,90,0.9)', 140, 0.5, 2);
-  shake(9, 0.3); hitstopT = Math.max(hitstopT, 0.07);
+  shake(9, 0.3); tone(110, 40, 0.3, 0.5, 'triangle'); noise(0.15, 0.4, 300); hitstopT = Math.max(hitstopT, 0.07);
   if (pl.hp <= 0) die();
 }
 
@@ -355,6 +390,8 @@ function updatePlayer(dt) {
   // timers / energy
   pl.dashCd = Math.max(0, pl.dashCd - dt); pl.noise = Math.max(0, pl.noise - dt * 0.8);
   pl.hurtT = Math.max(0, pl.hurtT - dt); pl.jaw = Math.max(0, pl.jaw - dt * 4);
+  pl.chomp = Math.max(0, pl.chomp - dt); pl.squash = Math.max(0, pl.squash - dt * 5); pl.comboT = Math.max(0, pl.comboT - dt);
+  for (let i = pl.gulps.length - 1; i >= 0; i--) { pl.gulps[i].pos += dt * 3.2; if (pl.gulps[i].pos > 1.1) pl.gulps.splice(i, 1); }
   pl.energy -= (0.9 + (pl.lightOn ? 3.2 : 0)) * dt;
   if (pl.energy <= 0) { pl.energy = 0; if (pl.lightOn) { pl.lightOn = false; hint('能量耗尽，光熄灭了。', 2.5); } pl.hp -= 6 * dt; if (pl.hp <= 0) die(); }
   else if (pl.energy > 50) pl.hp = Math.min(100, pl.hp + 2.5 * dt);
@@ -379,9 +416,14 @@ function updatePlayer(dt) {
     const edible = c.r < pl.r * 0.92;
     if (edible) {
       if (dist < reach + c.r) eat(c);
-      else if (dist < pl.r * 3 + c.r) pl.jaw = Math.max(pl.jaw, 0.55);
-    } else if ((c.type === 'pred' || c.type === 'brute') && Math.hypot(c.x - pl.x, c.y - pl.y) < c.r * 0.85 + pl.r * 0.8) {
-      if (c.cd <= 0 && c.r > pl.r * 1.05) { hurt(c.type === 'brute' ? 45 : 24, c.x, c.y); c.cd = 1.1; c.vx *= -0.3; c.vy *= -0.3; }
+      else if (dist < pl.r * 3 + c.r) {
+        pl.jaw = Math.max(pl.jaw, 0.55 + 0.45 * (1 - dist / (pl.r * 3 + c.r)));
+        // suction: prey in front of the mouth gets pulled in
+        const front = Math.cos(angDiff(pl.ang, Math.atan2(dy, dx)));
+        if (front > 0.3 && P.suction > 0) { const k = P.suction * 520 * front * (1 - dist / (pl.r * 3 + c.r)) * dt; c.vx -= dx / dist * k; c.vy -= dy / dist * k; c.x -= dx / dist * k * dt * 8; c.y -= dy / dist * k * dt * 8; }
+      }
+    } else if ((c.type === 'pred' || c.type === 'brute') && c.state !== 'retreat' && Math.hypot(c.x - pl.x, c.y - pl.y) < c.r * 0.85 + pl.r * 0.8) {
+      if (c.cd <= 0 && c.r > pl.r * 1.05) { hurt(c.type === 'brute' ? 45 : 24, c.x, c.y); c.cd = 1.1; c.st = P.chaseGiveUp; c.vx *= -0.3; c.vy *= -0.3; }
     }
   }
 }
@@ -445,10 +487,16 @@ function updateCreatures(dt) {
           else if (!threat && dist < 260) { c.state = 'flee'; c.st = 3; }
         } else if (c.state === 'notice') {
           spd = 20; c.st -= dt; c.ang += clamp(angDiff(c.ang, Math.atan2(dy, dx)), -6 * dt, 6 * dt);
-          if (c.st <= 0) { c.state = 'chase'; c.st = 6; }
+          if (c.st <= 0) { c.state = 'chase'; c.st = P.chaseGiveUp; }
         } else if (c.state === 'chase') {
           c.st -= dt; ax = dx / dist * 700; ay = dy / dist * 700;
-          if (!threat || c.st <= 0 || dist > 650 || pl.dead) c.state = 'wander';
+          if (c.st <= 0 && threat && !pl.dead) { c.state = 'retreat'; c.st = P.retreatTime; }
+          else if (!threat || dist > 650 || pl.dead) c.state = 'wander';
+        } else if (c.state === 'retreat') {
+          // gave up: turn away and leave the player alone for a while
+          c.st -= dt; spd = T.spd * 0.5;
+          if (c.st > P.retreatTime - 1.5) { ax = -dx / dist * 500; ay = -dy / dist * 500; } else { ax = Math.cos(c.wob) * 50; ay = Math.sin(c.wob) * 30; }
+          if (c.st <= 0) c.state = 'wander';
         } else if (c.state === 'flee') {
           c.st -= dt; ax = -dx / dist * 700; ay = -dy / dist * 700; spd = T.spd * 0.85;
           if (c.st <= 0) c.state = 'wander';
@@ -485,6 +533,8 @@ function nearSchool() {
 function updateFx(dt) {
   for (let i = parts.length - 1; i >= 0; i--) { const p = parts[i]; p.life -= dt; if (p.life <= 0) { parts.splice(i, 1); continue; } p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.94; p.vy *= 0.94; }
   shakeT = Math.max(0, shakeT - dt); if (shakeT <= 0) shakeMag = 0;
+  for (let i = swallows.length - 1; i >= 0; i--) { swallows[i].t += dt / 0.13; if (swallows[i].t >= 1) swallows.splice(i, 1); }
+  for (let i = floats.length - 1; i >= 0; i--) { floats[i].t -= dt; floats[i].y -= 30 * dt; if (floats[i].t <= 0) floats.splice(i, 1); }
   if (toastT > 0) { toastT -= dt; if (toastT <= 0) $('toast').style.opacity = 0; }
   if (hintT > 0) { hintT -= dt; if (hintT <= 0) $('hint').textContent = ''; }
 }
@@ -533,15 +583,18 @@ function drawPlayer() {
   for (let i = pl.tail.length - 1; i >= 1; i--) {
     const p = pl.tail[i], k = 1 - i / pl.tail.length;
     ctx.fillStyle = `rgba(170,225,245,${0.18 + k * 0.25})`;
-    ctx.beginPath(); ctx.arc(p.x, p.y, r * (0.25 + k * 0.55), 0, 6.28); ctx.fill();
+    let bulge = 0; for (const gq of pl.gulps) bulge += gq.size * Math.max(0, 1 - Math.abs(gq.pos - i / pl.tail.length) * 6);
+    ctx.beginPath(); ctx.arc(p.x, p.y, r * (0.25 + k * 0.55 + bulge * 0.7), 0, 6.28); ctx.fill();
   }
   ctx.save(); ctx.translate(pl.x, pl.y); ctx.rotate(pl.ang);
+  const sq = pl.squash; ctx.scale(1 + sq * 0.22, 1 - sq * 0.16);
   // dash fins
   if (pl.dash) { ctx.fillStyle = 'rgba(230,242,246,0.55)'; ctx.beginPath(); ctx.moveTo(-r * 0.1, -r * 0.6); ctx.lineTo(-r * 0.9, -r * 1.25); ctx.lineTo(-r * 0.6, -r * 0.5); ctx.fill(); ctx.beginPath(); ctx.moveTo(-r * 0.1, r * 0.6); ctx.lineTo(-r * 0.9, r * 1.25); ctx.lineTo(-r * 0.6, r * 0.5); ctx.fill(); }
   // body with jaw
   const jaw = pl.jaw * 0.7;
   ctx.fillStyle = 'rgba(185,235,250,0.5)'; ctx.strokeStyle = 'rgba(210,245,255,0.9)'; ctx.lineWidth = Math.max(0.8, r * 0.08);
   ctx.beginPath(); ctx.arc(0, 0, r, jaw, Math.PI * 2 - jaw); ctx.lineTo(0, 0); ctx.closePath(); ctx.fill(); ctx.stroke();
+  if (pl.chomp > 0) { ctx.strokeStyle = `rgba(255,255,255,${pl.chomp * 5})`; ctx.lineWidth = Math.max(1, r * 0.12); ctx.beginPath(); ctx.arc(r * 0.9, 0, r * (0.4 + (0.14 - pl.chomp) * 6), -1.2, 1.2); ctx.stroke(); }
   // inner core: the "seed"
   ctx.fillStyle = 'rgba(95,242,212,0.75)'; ctx.beginPath(); ctx.arc(-r * 0.25, 0, r * 0.28, 0, 6.28); ctx.fill();
   ctx.fillStyle = '#eafcff'; ctx.beginPath(); ctx.arc(r * 0.35, -r * 0.42, Math.max(1, r * 0.13), 0, 6.28); ctx.fill();
@@ -603,6 +656,12 @@ function render() {
     else if (c.type === 'shrimp') { ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.ang); ctx.strokeStyle = T.color; ctx.lineWidth = c.r * 0.5; ctx.lineCap = 'round'; ctx.beginPath(); ctx.arc(-c.r * 0.3, 0, c.r, -0.9, 1.6); ctx.stroke(); ctx.restore(); }
     else drawFish(c, T, s);
   }
+  for (const sw of swallows) {
+    const mx = pl.x + Math.cos(pl.ang) * pl.r * 0.6, my = pl.y + Math.sin(pl.ang) * pl.r * 0.6, e = sw.t * sw.t;
+    const T = TYPES[sw.type]; ctx.globalAlpha = 1 - sw.t * 0.6;
+    ctx.fillStyle = T.color; ctx.beginPath(); ctx.arc(sw.x + (mx - sw.x) * e, sw.y + (my - sw.y) * e, sw.r * (1 - e * 0.85), 0, 6.28); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
   drawPlayer();
   // darkness overlay with vision hole
   const depthT = clamp((pl.y - 150) / 2200, 0, 1);
@@ -663,6 +722,10 @@ function render() {
     ctx.save(); ctx.translate(c.x, c.y - c.r * 1.4); ctx.scale(1 / s, 1 / s);
     ctx.fillStyle = '#ff6b5a'; ctx.fillText('!', 0, 0); ctx.restore();
   }
+  for (const f of floats) {
+    ctx.save(); ctx.translate(f.x, f.y); ctx.scale(1 / s, 1 / s); ctx.globalAlpha = Math.min(1, f.t * 2);
+    ctx.fillStyle = '#5ff2d4'; ctx.font = '600 16px "Noto Serif SC", serif'; ctx.fillText(f.txt, 0, 0); ctx.restore();
+  }
   // joystick
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   if (stick.active) {
@@ -720,7 +783,7 @@ $('copyP').addEventListener('click', () => {
 buildSliders();
 
 $('start').addEventListener('click', () => {
-  $('title').hidden = true; running = true;
+  $('title').hidden = true; running = true; initAudio();
   hint('你很小。先吃发光的浮游生物和小鱼，慢慢长大。', 6);
 });
 resize();
