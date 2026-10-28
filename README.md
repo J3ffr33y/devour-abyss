@@ -2,6 +2,7 @@
 
 2.5D 单机深海「吞噬进化」游戏（3D 画面、平面玩法）。首发目标 Steam（PC），一人开发。方案见 [docs/design-bible/09-2.5D方案.md](docs/design-bible/09-2.5D方案.md)。
 
+- `game/`：Godot 4 正式工程（用 Godot 打开 `game/project.godot`，见 [game/README.md](game/README.md)）
 - `prototype/feel/`：2D 手感原型（手感参数会沿用到正式版），浏览器直接打开 `index.html` 就能玩
 - `prototype/visual-2.5d/`：2.5D 画面演示（正式版的画面方向）
 - `docs/`：设计文档，入口见 [docs/README.md](docs/README.md)
