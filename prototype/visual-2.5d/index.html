@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"></head><body>
+<title>深渊之种 2.5D 画面</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: full-screen WebGL view, small HUD in corners. Single dark deep-sea look by design. */
+:root {
+  --abyss: #02060b;
+  --ink: #d8eef5;
+  --dim: #7f9bab;
+  --bio: #5ff2d4;
+  --warn: #ff6b5a;
+  --line: rgba(120, 190, 210, 0.25);
+  --f-display: "Noto Serif SC", "Songti SC", serif;
+  --f-body: "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
+  color-scheme: dark;
+}
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { background: var(--abyss); color: var(--ink); font-family: var(--f-body); overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+.hud { position: fixed; pointer-events: none; font-size: 12px; }
+#tl { top: calc(12px + env(safe-area-inset-top, 0px)); left: max(16px, env(safe-area-inset-left, 0px)); display: grid; gap: 4px; }
+#tl b { font-family: var(--f-display); font-weight: 600; letter-spacing: 0.2em; font-size: 15px; }
+#tl span { color: var(--dim); }
+#tr { top: calc(12px + env(safe-area-inset-top, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); text-align: right; display: grid; gap: 4px; font-variant-numeric: tabular-nums; }
+#hint { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); color: var(--dim); font-size: 13px; text-align: center; max-width: 90vw; pointer-events: none; transition: opacity .5s; }
+#hurt { position: fixed; inset: 0; pointer-events: none; box-shadow: inset 0 0 160px rgba(255, 60, 40, 0.7); opacity: 0; transition: opacity .25s; }
+#camBtn { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); font: inherit; color: var(--ink); background: rgba(6,16,26,0.8); border: 1px solid var(--line); border-radius: 4px; padding: 6px 10px; cursor: pointer; }
+#camBtn:focus-visible, #go:focus-visible { outline: 2px solid var(--bio); outline-offset: 2px; }
+#intro { position: fixed; inset: 0; display: grid; place-items: center; background: radial-gradient(ellipse at 50% 40%, rgba(20,60,70,0.5), var(--abyss) 70%); padding-inline: max(16px, env(safe-area-inset-left, 0px)) max(16px, env(safe-area-inset-right, 0px)); }
+#intro .box { max-width: 440px; display: grid; gap: 12px; text-align: center; }
+#intro h1 { margin: 0; font-family: var(--f-display); font-weight: 600; letter-spacing: 0.25em; font-size: clamp(26px, 7vw, 38px); text-wrap: balance; }
+#intro p { margin: 0; color: var(--dim); line-height: 1.7; font-size: 13px; }
+#go { justify-self: center; font: inherit; font-size: 15px; letter-spacing: 0.3em; color: var(--bio); background: transparent; border: 1px solid var(--bio); border-radius: 4px; padding: 10px 26px; cursor: pointer; }
+#err { color: var(--warn); }
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600&family=Noto+Sans+SC:wght@400&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<canvas id="view"></canvas>
+<div class="hud" id="tl"><b>深渊之种</b><span>2.5D 画面演示 · 玩法仍在一个平面上</span></div>
+<div class="hud" id="tr"><div>深度 <span id="depth">0</span> m</div><div>吞噬 <span id="eaten">0</span></div></div>
+<div id="hint"></div>
+<div id="hurt"></div>
+<button id="camBtn" type="button">切换镜头 (C)</button>
+<div id="intro">
+  <div class="box">
+    <h1>深渊之种</h1>
+    <p>2.5D 画面演示。角色和怪物都是 3D 渲染，但你只在一个平面里游动，操作和 2D 原型一样。</p>
+    <p>WASD / 方向键游动，或按住鼠标（手指）朝那个方向游。碰到比你小的鱼会吞下。C 键切换侧视和斜俯视两种镜头。</p>
+    <p>留意背景深处。</p>
+    <button id="go" type="button">下潜</button>
+    <p id="err" hidden>这台设备的浏览器没能启动 WebGL，3D 画面无法显示。</p>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+const $ = id => document.getElementById(id);
+if (!window.THREE) { $('err').hidden = false; $('err').textContent = '3D 库没有加载成功，请刷新再试。'; return; }
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+
+let renderer;
+try { renderer = new THREE.WebGLRenderer({ canvas: $('view'), antialias: true }); }
+catch (e) { $('err').hidden = false; $('go').hidden = true; return; }
+renderer.setPixelRatio(Math.min(2, devicePixelRatio || 1));
+const scene = new THREE.Scene();
+const FOG_SHALLOW = new THREE.Color('#0f4a63'), FOG_DEEP = new THREE.Color('#020910');
+scene.fog = new THREE.FogExp2(FOG_SHALLOW.clone(), 0.011);
+scene.background = FOG_SHALLOW.clone();
+const camera = new THREE.PerspectiveCamera(48, 1, 0.1, 600);
+
+// ---------- lights ----------
+const hemi = new THREE.HemisphereLight(0x7fd4ee, 0x05121a, 0.7); scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xbfefff, 0.9); sun.position.set(20, 80, 30); scene.add(sun);
+const playerLight = new THREE.PointLight(0x9ff7ff, 1.4, 28, 2); scene.add(playerLight);
+
+// ---------- helpers ----------
+function glowTexture(inner, outer) {
+  const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d');
+  const r = g.createRadialGradient(32, 32, 0, 32, 32, 32); r.addColorStop(0, inner); r.addColorStop(1, outer);
+  g.fillStyle = r; g.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c);
+}
+const glowTex = glowTexture('rgba(255,255,255,1)', 'rgba(255,255,255,0)');
+function glowSprite(color, size, opacity = 1) {
+  const m = new THREE.SpriteMaterial({ map: glowTex, color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
+  const s = new THREE.Sprite(m); s.scale.set(size, size, 1); return s;
+}
+
+// ---------- environment ----------
+// sea floor receding into the distance
+const floorGeo = new THREE.PlaneGeometry(900, 320, 120, 40);
+floorGeo.rotateX(-Math.PI / 2);
+const fp = floorGeo.attributes.position;
+for (let i = 0; i < fp.count; i++) {
+  const x = fp.getX(i), z = fp.getZ(i);
+  fp.setY(i, Math.sin(x * 0.05) * 3 + Math.sin(x * 0.013 + z * 0.02) * 7 + Math.cos(z * 0.07) * 2 + (z < -60 ? (z + 60) * 0.12 : 0));
+}
+floorGeo.computeVertexNormals();
+const floor = new THREE.Mesh(floorGeo, new THREE.MeshStandardMaterial({ color: 0x14262e, roughness: 1, flatShading: true }));
+floor.position.set(150, -72, -110); scene.add(floor);
+const FLOOR_Y = -66;
+
+// rocks at many depths: the parallax shows the 2.5D space
+const rockMat = new THREE.MeshStandardMaterial({ color: 0x1b2f38, roughness: 1, flatShading: true });
+for (let i = 0; i < 70; i++) {
+  const s = rand(2, 14), m = new THREE.Mesh(new THREE.DodecahedronGeometry(s, 0), rockMat);
+  const z = i < 12 ? rand(8, 20) : rand(-180, -8);
+  m.position.set(rand(-150, 450), FLOOR_Y - s * 0.3 + (z < -60 ? (z + 60) * 0.12 : 0), z);
+  m.rotation.set(rand(0, 6), rand(0, 6), rand(0, 6)); m.scale.y = rand(0.6, 1.8);
+  scene.add(m);
+}
+// tall kelp-like spires
+for (let i = 0; i < 26; i++) {
+  const h = rand(15, 50), m = new THREE.Mesh(new THREE.ConeGeometry(rand(1.5, 4), h, 5), rockMat);
+  m.position.set(rand(-150, 450), FLOOR_Y + h / 2 - 3, rand(-140, -15)); scene.add(m);
+}
+// the giant ribs from the opening: still slowly breathing
+const boneMat = new THREE.MeshStandardMaterial({ color: 0xcfc6a8, roughness: 0.9, flatShading: true });
+const ribs = new THREE.Group();
+for (let i = 0; i < 10; i++) {
+  const rib = new THREE.Mesh(new THREE.TorusGeometry(26 - Math.abs(i - 4.5) * 1.6, 1.4, 6, 20, Math.PI), boneMat);
+  rib.position.set(i * 9, 0, 0); rib.rotation.y = Math.PI / 2 + 0.12; ribs.add(rib);
+}
+const spine = new THREE.Mesh(new THREE.CylinderGeometry(1.8, 1.8, 95, 6), boneMat);
+spine.rotation.z = Math.PI / 2; spine.position.set(40, 25, 0); ribs.add(spine);
+ribs.position.set(20, FLOOR_Y + 4, -48); scene.add(ribs);
+
+// water surface seen from below
+const surf = new THREE.Mesh(new THREE.PlaneGeometry(1200, 600), new THREE.MeshBasicMaterial({ color: 0x9fe6f5, transparent: true, opacity: 0.35, side: THREE.DoubleSide, fog: false }));
+surf.rotation.x = Math.PI / 2; surf.position.set(150, 4, -150); scene.add(surf);
+// god rays
+const rayTex = (() => { const c = document.createElement('canvas'); c.width = 16; c.height = 128; const g = c.getContext('2d'); const l = g.createLinearGradient(0, 0, 0, 128); l.addColorStop(0, 'rgba(255,255,255,0.9)'); l.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = l; g.fillRect(0, 0, 16, 128); return new THREE.CanvasTexture(c); })();
+const rays = [];
+for (let i = 0; i < 14; i++) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(rand(4, 10), 90), new THREE.MeshBasicMaterial({ map: rayTex, color: 0xa8eaff, transparent: true, opacity: rand(0.05, 0.12), blending: THREE.AdditiveBlending, depthWrite: false, fog: false, side: THREE.DoubleSide }));
+  m.position.set(rand(-100, 400), -40, rand(-120, -5)); m.rotation.z = rand(-0.35, -0.15); rays.push(m); scene.add(m);
+}
+// marine snow
+const SNOW = 2500, snowPos = new Float32Array(SNOW * 3);
+for (let i = 0; i < SNOW; i++) { snowPos[i * 3] = rand(-80, 80); snowPos[i * 3 + 1] = rand(-80, 10); snowPos[i * 3 + 2] = rand(-90, 25); }
+const snowGeo = new THREE.BufferGeometry(); snowGeo.setAttribute('position', new THREE.BufferAttribute(snowPos, 3));
+const snow = new THREE.Points(snowGeo, new THREE.PointsMaterial({ color: 0xcfeaf2, size: 0.25, transparent: true, opacity: 0.6, depthWrite: false }));
+scene.add(snow);
+
+// jellyfish drifting at several depths
+const jellies = [];
+for (let i = 0; i < 16; i++) {
+  const g = new THREE.Group();
+  const bell = new THREE.Mesh(new THREE.SphereGeometry(1.4, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0x5ff2d4, transparent: true, opacity: 0.55, fog: false }));
+  g.add(bell); g.add(glowSprite(0x5ff2d4, 9, 0.5));
+  for (let k = 0; k < 4; k++) { const t = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.02, 3, 3), bell.material); t.position.set((k - 1.5) * 0.5, -1.5, 0); g.add(t); }
+  g.position.set(rand(-60, 380), rand(-60, -15), rand(-120, -10)); g.userData = { ph: rand(0, 6) };
+  jellies.push(g); scene.add(g);
+}
+
+// ---------- fish ----------
+const fishMats = [0xb9cfd9, 0xd5e2e8, 0x9fb8c4].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.5, metalness: 0.2, flatShading: true }));
+function makeFish(color) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 6), fishMats[color]); body.scale.set(1.5, 0.65, 0.45); g.add(body);
+  const tail = new THREE.Mesh(new THREE.ConeGeometry(0.55, 1, 4), fishMats[color]); tail.rotation.z = Math.PI / 2; tail.position.x = -1.7; tail.scale.z = 0.3; g.add(tail);
+  g.userData.tail = tail; return g;
+}
+const prey = [];
+function spawnPrey(near) {
+  const f = makeFish(Math.random() * 3 | 0); const s = rand(0.3, 0.75); f.scale.setScalar(s);
+  const a = rand(0, 6.28), d = near ? rand(25, 45) : rand(5, 40);
+  f.position.set(player.pos.x + Math.cos(a) * d, clamp(player.pos.y + Math.sin(a) * d * 0.6, FLOOR_Y + 3, -3), 0);
+  f.userData = { ...f.userData, vx: rand(-3, 3), vy: 0, size: s, ph: rand(0, 6), alive: true };
+  prey.push(f); scene.add(f);
+}
+// decorative schools far behind the play plane
+const schools = [];
+for (let sc = 0; sc < 5; sc++) {
+  const grp = new THREE.Group(); const z = rand(-110, -30);
+  for (let i = 0; i < 18; i++) { const f = makeFish(sc % 3); f.scale.setScalar(rand(0.6, 1)); f.position.set(rand(-8, 8), rand(-4, 4), rand(-5, 5)); f.userData.ph = rand(0, 6); grp.add(f); }
+  grp.position.set(rand(-50, 350), rand(-55, -15), z); grp.userData = { v: rand(3, 6) * (Math.random() < 0.5 ? -1 : 1) };
+  if (grp.userData.v < 0) grp.scale.x = -1;
+  schools.push(grp); scene.add(grp);
+}
+
+// ---------- player ----------
+const player = { pos: new THREE.Vector3(30, -28, 0), vel: new THREE.Vector2(), ang: 0, r: 1, mass: 1, squash: 0, eaten: 0, hurtT: 0 };
+const pBodyMat = new THREE.MeshStandardMaterial({ color: 0xbfeeff, transparent: true, opacity: 0.55, roughness: 0.2, emissive: 0x15434d });
+const pGroup = new THREE.Group(); scene.add(pGroup);
+const pBody = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), pBodyMat); pGroup.add(pBody);
+const pCore = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 8), new THREE.MeshBasicMaterial({ color: 0x5ff2d4 })); pCore.position.x = -0.25; pGroup.add(pCore);
+const pEye = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 6), new THREE.MeshBasicMaterial({ color: 0xeafcff })); pEye.position.set(0.45, 0.35, 0.75); pGroup.add(pEye);
+pGroup.add(glowSprite(0x5ff2d4, 4, 0.45));
+const tail = [];
+for (let i = 0; i < 8; i++) { const m = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 8), pBodyMat); m.position.copy(player.pos); tail.push(m); scene.add(m); }
+
+// ---------- the leviathan in the deep ----------
+const lev = { segs: [], trail: [], t: -10, active: false };
+const levMat = new THREE.MeshStandardMaterial({ color: 0x24323b, roughness: 0.8, flatShading: true });
+for (let i = 0; i < 60; i++) {
+  const r = 5.5 * (1 - i / 75) + 0.6;
+  const m = new THREE.Mesh(new THREE.SphereGeometry(r, 10, 8), levMat); m.scale.set(1.5, 1, 1);
+  if (i % 4 === 2) { const s = glowSprite(0x7ff0ff, r * 1.4, 0.8); s.position.y = r * 0.9; m.add(s); }
+  m.visible = false; lev.segs.push(m); scene.add(m);
+}
+const levEye = glowSprite(0xffa04a, 5, 1); lev.segs[0].add(levEye); levEye.position.set(4, 1.5, 3.5);
+
+// ---------- predator that rises out of the depth ----------
+const pred = makeFish(2); pred.scale.setScalar(2.8); scene.add(pred);
+pred.children[0].material = new THREE.MeshStandardMaterial({ color: 0x55666f, roughness: 0.6, flatShading: true });
+pred.children[1].material = pred.children[0].material;
+const predEye = glowSprite(0xff6b5a, 2.2, 0); predEye.position.set(1.1, 0.25, 0.4); pred.add(predEye);
+const P = { state: 'deep', t: 6, vx: 0, vy: 0, z: -70 };
+pred.position.set(player.pos.x + 40, -40, -70);
+
+// ---------- particles ----------
+const parts = [];
+function burst(pos, color, n, spd) {
+  for (let i = 0; i < n; i++) {
+    const s = glowSprite(color, rand(0.4, 0.9), 0.9); s.position.copy(pos);
+    s.userData = { v: new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-0.5, 0.5)).multiplyScalar(spd), life: 0.5 };
+    parts.push(s); scene.add(s);
+  }
+}
+
+// ---------- sound ----------
+let AC = null;
+function tone(f0, f1, dur, vol, type = 'sine') {
+  if (!AC) return; const t = AC.currentTime, o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(AC.destination); o.start(t); o.stop(t + dur + 0.05);
+}
+
+// ---------- input ----------
+const keys = new Set(); let ptr = null;
+addEventListener('keydown', e => { const k = e.key.toLowerCase(); keys.add(k); if (k === 'c') camMode = (camMode + 1) % 2; if (k.startsWith('arrow') || k === ' ') e.preventDefault(); });
+addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+addEventListener('blur', () => keys.clear());
+$('view').addEventListener('pointerdown', e => { ptr = { x: e.clientX, y: e.clientY, id: e.pointerId }; });
+$('view').addEventListener('pointermove', e => { if (ptr && ptr.id === e.pointerId) { ptr.x = e.clientX; ptr.y = e.clientY; } });
+const up = e => { if (ptr && ptr.id === e.pointerId) ptr = null; };
+$('view').addEventListener('pointerup', up); $('view').addEventListener('pointercancel', up);
+$('camBtn').addEventListener('click', () => { camMode = (camMode + 1) % 2; });
+const ndc = new THREE.Vector3();
+function pointerWorld() {
+  ndc.set(ptr.x / innerWidth * 2 - 1, -(ptr.y / innerHeight) * 2 + 1, 0.5).unproject(camera);
+  const dir = ndc.sub(camera.position).normalize(); const t = -camera.position.z / dir.z;
+  return camera.position.clone().add(dir.multiplyScalar(t));
+}
+function inputDir() {
+  let x = 0, y = 0;
+  if (keys.has('a') || keys.has('arrowleft')) x -= 1; if (keys.has('d') || keys.has('arrowright')) x += 1;
+  if (keys.has('w') || keys.has('arrowup')) y += 1; if (keys.has('s') || keys.has('arrowdown')) y -= 1;
+  const m = Math.hypot(x, y); if (m) return [x / m, y / m];
+  if (ptr) { const w = pointerWorld(); const dx = w.x - player.pos.x, dy = w.y - player.pos.y, d = Math.hypot(dx, dy); if (d > 1) { const k = Math.min(1, d / 8); return [dx / d * k, dy / d * k]; } }
+  return [0, 0];
+}
+
+// ---------- hint ----------
+let hintT = 0;
+function hint(t, d = 4) { $('hint').textContent = t; $('hint').style.opacity = 1; hintT = d; }
+
+// ---------- camera ----------
+let camMode = 0; const camTarget = new THREE.Vector3(); let shake = 0;
+function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.fov = innerWidth < innerHeight ? 64 : 48; camera.updateProjectionMatrix(); }
+addEventListener('resize', resize); resize();
+
+// ---------- loop ----------
+let running = false, last = 0, time = 0;
+const tmp = new THREE.Vector3();
+function update(dt) {
+  time += dt;
+  // player movement in the plane z = 0
+  const [ix, iy] = inputDir();
+  player.vel.x += ix * 42 * dt; player.vel.y += iy * 42 * dt;
+  const drag = Math.exp(-2.6 * dt); player.vel.multiplyScalar(drag);
+  const maxS = 11 * (1 + 0.25 * Math.log(player.r)); const sp = player.vel.length(); if (sp > maxS) player.vel.multiplyScalar((maxS + (sp - maxS) * Math.exp(-5 * dt)) / sp);
+  player.pos.x += player.vel.x * dt; player.pos.y += player.vel.y * dt;
+  player.pos.y = clamp(player.pos.y, FLOOR_Y + player.r, -1.5 - player.r);
+  player.pos.x = clamp(player.pos.x, -120, 420);
+  const want = (ix || iy) ? Math.atan2(iy, ix) : (sp > 1 ? Math.atan2(player.vel.y, player.vel.x) : player.ang);
+  let da = want - player.ang; while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
+  player.ang += clamp(da, -9 * dt, 9 * dt);
+  player.squash = Math.max(0, player.squash - dt * 5); player.hurtT = Math.max(0, player.hurtT - dt);
+  pGroup.position.copy(player.pos); pGroup.rotation.z = player.ang;
+  // roll the body a little when turning so it reads as 3D
+  pGroup.rotation.x = Math.sin(time * 2) * 0.15 + clamp(da, -1, 1) * 0.4;
+  const sq = player.squash; pGroup.scale.set(player.r * (1 + sq * 0.25), player.r * (1 - sq * 0.15), player.r * (1 - sq * 0.15));
+  playerLight.position.copy(player.pos).add(tmp.set(0, 0, 3));
+  // tail chain
+  const seg = player.r * 0.62; let prev = tmp.set(player.pos.x - Math.cos(player.ang) * player.r * 0.6, player.pos.y - Math.sin(player.ang) * player.r * 0.6, 0).clone();
+  const wig = Math.sin(time * (8 + sp * 0.6)) * Math.min(1, sp / 8) * player.r * 0.25;
+  tail.forEach((m, i) => {
+    const k = 1 - i / tail.length;
+    const tx = m.position.x - Math.sin(player.ang) * wig * (i / tail.length), ty = m.position.y + Math.cos(player.ang) * wig * (i / tail.length);
+    const dx = tx - prev.x, dy = ty - prev.y, d = Math.hypot(dx, dy) || 1;
+    m.position.set(prev.x + dx / d * seg, prev.y + dy / d * seg, Math.sin(time * 3 + i) * 0.1);
+    m.scale.setScalar(player.r * (0.25 + k * 0.55)); prev = m.position;
+  });
+  // prey: wander, flee, get eaten
+  const mouth = tmp.set(player.pos.x + Math.cos(player.ang) * player.r * 0.9, player.pos.y + Math.sin(player.ang) * player.r * 0.9, 0).clone();
+  for (const f of prey) {
+    const u = f.userData; if (!u.alive) continue;
+    const dx = player.pos.x - f.position.x, dy = player.pos.y - f.position.y, d = Math.hypot(dx, dy) || 1;
+    u.ph += dt;
+    let ax = Math.cos(u.ph * 0.7) * 2, ay = Math.sin(u.ph * 1.1) * 1.5;
+    const smaller = u.size < player.r * 0.92;
+    if (smaller && d < 9) { ax -= dx / d * 40; ay -= dy / d * 40; }
+    if (lev.active && Math.abs(lev.segs[0].position.x - f.position.x) < 40) ay += 20;
+    u.vx += ax * dt; u.vy += ay * dt; const s2 = Math.hypot(u.vx, u.vy), mx = smaller && d < 9 ? 10 : 3;
+    if (s2 > mx) { u.vx *= mx / s2; u.vy *= mx / s2; }
+    f.position.x += u.vx * dt; f.position.y = clamp(f.position.y + u.vy * dt, FLOOR_Y + 1, -2);
+    f.rotation.z = Math.atan2(u.vy, Math.abs(u.vx)) * 0.5 * Math.sign(u.vx || 1); f.scale.x = u.size * Math.sign(u.vx || 1);
+    u.tail.rotation.y = Math.sin(u.ph * 12) * 0.5;
+    const md = mouth.distanceTo(f.position);
+    if (smaller && md < player.r * 3) { // suction
+      const k = 30 * (1 - md / (player.r * 3)) * dt; f.position.x -= (f.position.x - mouth.x) * k * 0.2; f.position.y -= (f.position.y - mouth.y) * k * 0.2;
+    }
+    if (smaller && md < player.r * 0.9 + u.size) {
+      u.alive = false; u.dying = 0; player.eaten++; player.squash = 0.8;
+      player.mass += u.size * u.size * 0.35; player.r = Math.min(4, Math.sqrt(player.mass));
+      burst(f.position, 0xbff6ff, 8, 6); shake = Math.max(shake, 0.25);
+      tone(240, 50, 0.16, 0.3);
+    }
+    if (Math.abs(f.position.x - player.pos.x) > 90) { u.alive = false; u.dying = 1; }
+  }
+  for (let i = prey.length - 1; i >= 0; i--) {
+    const f = prey[i], u = f.userData;
+    if (!u.alive) {
+      u.dying += dt / 0.15;
+      f.position.lerp(mouth, Math.min(1, u.dying)); f.scale.multiplyScalar(0.8);
+      if (u.dying >= 1) { scene.remove(f); prey.splice(i, 1); }
+    }
+  }
+  while (prey.filter(f => f.userData.alive).length < 40) spawnPrey(true);
+  // decorative schools and jellies
+  for (const g of schools) {
+    g.position.x += g.userData.v * dt; if (g.position.x > 480) g.position.x = -150; if (g.position.x < -150) g.position.x = 480;
+    g.children.forEach(f => { f.userData.ph += dt; f.position.y += Math.sin(f.userData.ph * 2) * 0.01; f.userData.tail.rotation.y = Math.sin(f.userData.ph * 10) * 0.5; });
+  }
+  for (const j of jellies) { j.userData.ph += dt; const p = Math.max(0, Math.sin(j.userData.ph * 2)); j.position.y += (p * 1.2 - 0.25) * dt; j.children[0].scale.set(1 + p * 0.15, 1 - p * 0.1, 1 + p * 0.15); if (j.position.y > -6) j.position.y = -60; }
+  // leviathan passes behind every ~40 s
+  lev.t += dt;
+  if (!lev.active && lev.t > 0) { lev.active = true; lev.t = 0; lev.dir = Math.random() < 0.5 ? 1 : -1; lev.trail.length = 0; lev.segs.forEach(s => s.visible = true); hint('……有什么东西在深处游过。', 5); }
+  if (lev.active) {
+    const dur = 30, k = lev.t / dur;
+    const hx = player.pos.x + lev.dir * lerp(-170, 170, k), hy = -38 + Math.sin(lev.t * 0.5) * 10, hz = -75 + Math.sin(lev.t * 0.3) * 18;
+    lev.trail.unshift(new THREE.Vector3(hx, hy, hz)); if (lev.trail.length > 400) lev.trail.pop();
+    lev.segs.forEach((s, i) => {
+      const p = lev.trail[Math.min(lev.trail.length - 1, i * 5)]; s.position.copy(p);
+      const q = lev.trail[Math.min(lev.trail.length - 1, i * 5 + 3)]; s.rotation.z = Math.atan2(p.y - q.y, p.x - q.x); s.rotation.y = lev.dir < 0 ? Math.PI : 0;
+    });
+    const near = Math.abs(hx - player.pos.x) < 50; if (near) shake = Math.max(shake, 0.12);
+    if (near && Math.random() < dt * 2) tone(55, 35, 1.2, 0.18, 'triangle');
+    if (lev.t > dur) { lev.active = false; lev.t = -14; lev.segs.forEach(s => s.visible = false); }
+  }
+  // predator: circles in the deep, rises into the play plane, chases, gives up, sinks back
+  P.t -= dt;
+  const pdx = player.pos.x - pred.position.x, pdy = player.pos.y - pred.position.y, pd = Math.hypot(pdx, pdy) || 1;
+  if (P.state === 'deep') { P.z = lerp(P.z, -60, dt); P.vx = lerp(P.vx, Math.sign(pdx) * 4, dt); P.vy = lerp(P.vy, pdy * 0.2, dt); predEye.material.opacity = 0.15; if (P.t <= 0 && player.hurtT <= 0) { P.state = 'rise'; P.t = 2.5; hint('深处有东西盯上你了。', 3); } }
+  else if (P.state === 'rise') { P.z = lerp(P.z, 0, dt * 1.6); P.vx = lerp(P.vx, pdx * 0.4, dt * 2); P.vy = lerp(P.vy, pdy * 0.4, dt * 2); predEye.material.opacity = 1; if (P.t <= 0) { P.state = 'chase'; P.t = 4; P.z = 0; } }
+  else if (P.state === 'chase') {
+    P.vx += pdx / pd * 40 * dt; P.vy += pdy / pd * 40 * dt; const s = Math.hypot(P.vx, P.vy); if (s > 12.5) { P.vx *= 12.5 / s; P.vy *= 12.5 / s; }
+    if (pd < 2.5 * 1.4 + player.r && player.hurtT <= 0) { player.hurtT = 1.2; player.vel.x += pdx / pd * 25; player.vel.y += pdy / pd * 25; shake = 0.8; $('hurt').style.opacity = 1; setTimeout(() => $('hurt').style.opacity = 0, 250); tone(110, 40, 0.35, 0.45, 'triangle'); P.t = 0; }
+    if (P.t <= 0) { P.state = 'sink'; P.t = 6; hint('它放弃了，沉回了深处。', 3); }
+  } else if (P.state === 'sink') { P.z = lerp(P.z, -70, dt * 0.8); P.vx = lerp(P.vx, -Math.sign(pdx) * 6, dt); P.vy = lerp(P.vy, -3, dt); predEye.material.opacity = 0.3; if (P.t <= 0) { P.state = 'deep'; P.t = rand(10, 16); } }
+  pred.position.x += P.vx * dt; pred.position.y = clamp(pred.position.y + P.vy * dt, FLOOR_Y + 4, -4); pred.position.z = P.z;
+  if (Math.abs(pred.position.x - player.pos.x) > 120) pred.position.x = player.pos.x - Math.sign(pdx) * 100;
+  pred.scale.x = 2.8 * (P.vx >= 0 ? 1 : -1); pred.rotation.z = Math.atan2(P.vy, Math.abs(P.vx)) * 0.4 * (P.vx >= 0 ? 1 : -1);
+  pred.userData.tail.rotation.y = Math.sin(time * 9) * 0.5;
+  // particles
+  for (let i = parts.length - 1; i >= 0; i--) { const p = parts[i]; p.userData.life -= dt; p.position.addScaledVector(p.userData.v, dt); p.material.opacity = p.userData.life * 2; if (p.userData.life <= 0) { scene.remove(p); parts.splice(i, 1); } }
+  // snow follows the camera volume
+  const sp3 = snowGeo.attributes.position;
+  for (let i = 0; i < SNOW; i++) { let x = sp3.getX(i), y = sp3.getY(i) - dt * 0.4; if (x < player.pos.x - 80) x += 160; if (x > player.pos.x + 80) x -= 160; if (y < player.pos.y - 50) y += 100; if (y > player.pos.y + 50) y -= 100; sp3.setXY(i, x, y); }
+  sp3.needsUpdate = true;
+  // depth sets light and fog
+  const depthT = clamp(-player.pos.y / 65, 0, 1);
+  scene.fog.color.copy(FOG_SHALLOW).lerp(FOG_DEEP, depthT); scene.background.copy(scene.fog.color);
+  scene.fog.density = lerp(0.009, 0.016, depthT);
+  sun.intensity = lerp(1.0, 0.15, depthT); hemi.intensity = lerp(0.75, 0.25, depthT);
+  rays.forEach(r => { r.material.opacity = (1 - depthT) * 0.1; });
+  // camera
+  const off = camMode === 0 ? [0, 3, 40] : [-14, 22, 34];
+  camTarget.set(player.pos.x + player.vel.x * 0.35 + off[0], player.pos.y + off[1], off[2] + player.r * 6);
+  camera.position.lerp(camTarget, 1 - Math.exp(-4 * dt));
+  shake = Math.max(0, shake - dt);
+  camera.position.x += (Math.random() - 0.5) * shake; camera.position.y += (Math.random() - 0.5) * shake;
+  camera.lookAt(player.pos.x + player.vel.x * 0.35, player.pos.y, -4);
+  // HUD
+  $('depth').textContent = Math.round(-player.pos.y * 15); $('eaten').textContent = player.eaten;
+  if (hintT > 0) { hintT -= dt; if (hintT <= 0) $('hint').style.opacity = 0; }
+}
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - last) / 1000 || 0); last = t;
+  if (running) update(dt); else { time += dt; camera.position.set(30 + Math.sin(time * 0.1) * 10, -25, 45); camera.lookAt(30, -32, -20); }
+  renderer.render(scene, camera);
+}
+$('go').addEventListener('click', () => {
+  $('intro').hidden = true; running = true; lev.t = -6;
+  try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; }
+  hint('你很小。吞下比你小的鱼。', 4);
+});
+requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
